@@ -116,6 +116,10 @@ def main() -> None:
     ap.add_argument("--limit-train", type=int, default=0)
     ap.add_argument("--limit-test", type=int, default=0)
     ap.add_argument("--out", default="align_results.json")
+    ap.add_argument("--save-steps", type=int, default=0,
+                    help="write a resumable checkpoint every N steps (0 disables, the default)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from the newest checkpoint in the adapter dir")
     args = ap.parse_args()
 
     import torch
@@ -166,6 +170,16 @@ def main() -> None:
 
     steps = max(1, len(load_jsonl(files["train"])) // max(1, args.batch * args.grad_accum))
 
+    # Derive the adapter dir from --out. Both arms used to hardcode "align", so a smoke
+    # run silently overwrote the adapter of a finished one and the two could never be
+    # told apart afterwards.
+    run_dir = str(Path(args.out).with_suffix(""))
+    adapter_dir = run_dir + "_adapter"
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+    save_kwargs = {"save_strategy": "steps" if args.save_steps else "no",
+                   "save_steps": max(1, args.save_steps), "save_total_limit": 2}
+    print(f"checkpoints/adapters -> {adapter_dir}")
+
     if args.method == "dpo":
         pref_path = tmp / "pref_train.jsonl"
         if not pref_path.exists():
@@ -180,14 +194,15 @@ def main() -> None:
         print(f"dpo pairs={len(rows)}")
         cfg = make_sft_config(
             DPOConfig, _total_steps=int(steps * args.epochs),
-            output_dir="align", num_train_epochs=args.epochs,
+            output_dir=adapter_dir, num_train_epochs=args.epochs,
             per_device_train_batch_size=args.batch,
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.lr, lr_scheduler_type="cosine", warmup_ratio=0.05,
-            logging_steps=10, save_strategy="no", max_length=args.max_length,
+            logging_steps=10, max_length=args.max_length,
             beta=args.beta, report_to=[], seed=13,
             bf16=(device == "cuda" and dtype == torch.bfloat16),
             fp16=(device == "cuda" and dtype == torch.float16),
+            **save_kwargs,
         )
         trainer = DPOTrainer(model=model, ref_model=None, args=cfg,
                              train_dataset=Dataset.from_list(rows), peft_config=lora,
@@ -201,28 +216,32 @@ def main() -> None:
         print(f"grpo prompts={len(rows)}")
         cfg = make_sft_config(
             GRPOConfig, _total_steps=int(steps * args.epochs),
-            output_dir="align", num_train_epochs=args.epochs,
+            output_dir=adapter_dir, num_train_epochs=args.epochs,
             per_device_train_batch_size=max(args.batch, args.num_generations),
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.lr, lr_scheduler_type="cosine", warmup_ratio=0.05,
             # GRPOConfig has no max_length: prompts are not truncated by a trainer arg,
             # only the sampled completion is capped. Passing max_length here would be
             # dropped silently, which is why the guard in make_sft_config exists.
-            logging_steps=10, save_strategy="no",
+            logging_steps=10,
             max_completion_length=args.max_completion_length,
             num_generations=args.num_generations, temperature=0.9, beta=args.beta,
             report_to=[], seed=13,
             bf16=(device == "cuda" and dtype == torch.bfloat16),
             fp16=(device == "cuda" and dtype == torch.float16),
+            **save_kwargs,
         )
         trainer = GRPOTrainer(model=model, reward_funcs=[make_reward(world_mod, tasks_by_id)],
                              args=cfg, train_dataset=Dataset.from_list(rows),
                              peft_config=lora, processing_class=tok)
 
     print("\n=== TRAINING ===")
-    trainer.train()
-    trainer.save_model("align")
-    tok.save_pretrained("align")
+    if args.resume:
+        print("resuming from the newest checkpoint in the adapter dir")
+    trainer.train(resume_from_checkpoint=True if args.resume else None)
+    trainer.save_model(adapter_dir)
+    tok.save_pretrained(adapter_dir)
+    print(f"saved adapter to {adapter_dir}")
 
     print("\n=== ALIGNED MODEL ===")
     model.eval()
@@ -245,6 +264,7 @@ def main() -> None:
                             "max_length": args.max_length},
         "train_rows": len(rows),
         "test_rows": len(test_rows),
+        "adapter_dir": adapter_dir,
         "start": {k: v for k, v in res_start.items() if k != "per_item"},
         "aligned": {k: v for k, v in res.items() if k != "per_item"},
         "delta": {"point": point, "ci": [lo, hi], "n": res_start["n"]},

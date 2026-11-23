@@ -1,0 +1,50 @@
+{
+  "method": "grpo",
+  "note": "checkpoint-15 of a 25-step run (200 prompts x 8 generations, lr 1e-6, beta 0.1, completion cap 256); run stopped early for time, checkpoints 10 and 15 kept",
+  "sft_adapter": "kirankunapuli/cpq-sft-qwen1.5b",
+  "adapter": "runs/grpo_200_adapter/checkpoint-15",
+  "train_prompts": 200,
+  "num_generations": 8,
+  "steps_done": 15,
+  "steps_planned": 25,
+  "observed": {
+    "reward_mean": 0.9109,
+    "reward_std": 0.2344,
+    "frac_reward_zero_std": 0.8875,
+    "kl": 1.23e-06,
+    "entropy": 0.001356,
+    "grad_norm": 0.04584
+  },
+  "baseline": {
+    "n": 110,
+    "correct": 102,
+    "accuracy": 0.9272727272727272,
+    "ci": [
+      0.8630186778224797,
+      0.962690026201357
+    ],
+    "errors": {
+      "invalid_argument": 8
+    }
+  },
+  "aligned": {
+    "n": 110,
+    "correct": 102,
+    "accuracy": 0.9272727272727272,
+    "ci": [
+      0.8630186778224797,
+      0.962690026201357
+    ],
+    "errors": {
+      "invalid_argument": 8
+    }
+  },
+  "delta": {
+    "point": 0.0,
+    "ci": [
+      0.0,
+      0.0
+    ],
+    "n": 110
+  }
+}

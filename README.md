@@ -10,6 +10,9 @@ task asked for. Everything else is rejected, and the rejections turn out to be u
 A 1.5B model trained on that data went from **0 correct out of 110** held-out tasks to
 **100 out of 110**.
 
+If you want the short version of why this exists and what the results mean, read
+[STORY.md](STORY.md). It is nine steps and one honest table.
+
 Dataset: [kirankunapuli/cpq-tooluse-verified](https://huggingface.co/datasets/kirankunapuli/cpq-tooluse-verified)
 
 ## Where this sits in post-training
@@ -21,8 +24,8 @@ each one needs, and that is where most of the engineering effort actually goes.
 | Stage | What it is | How it works | What this project did | Result |
 |---|---|---|---|---|
 | **SFT**<br>supervised fine-tuning | The model copies correct answers | Loss lands on the answer tokens only, over traces the verifier accepted | 872 verified traces, QLoRA rank 16 on Qwen2.5-1.5B | 0/110 to **100/110** |
-| **DPO**<br>direct preference optimisation | The model learns from pairs: same prompt, one better answer, one worse | Raise the probability of the chosen answer, lower the rejected one. No reward model needed | 2,180 pairs, produced free by the verifier's rejections | 102/110 to **68/110**, it regressed |
-| **GRPO**<br>group relative policy optimisation | The model learns from its own attempts | Sample a group of answers per prompt, score each, use the group average as the baseline instead of a value network | Not run. Needs a harder task mix to produce any score spread | unrun |
+| **DPO**<br>direct preference optimisation | The model learns from pairs: same prompt, one better answer, one worse | Raise the probability of the chosen answer, lower the rejected one. No reward model needed | 2,180 pairs, produced free by the verifier's rejections | 102/110 to **68/110** at lr 5e-5; **back to 102/110** at lr 5e-6 |
+| **GRPO**<br>group relative policy optimisation | The model learns from its own attempts | Sample a group of answers per prompt, score each, use the group average as the baseline instead of a value network | 200 prompts x 8 generations, binary verifiable reward | **102/110**, no change |
 | **RLVR**<br>RL with verifiable rewards | Reinforcement learning where the reward is a program, not a person | Reward 1 when the replay matches the declared effects, 0 otherwise. Nothing to label | The verifier already is that reward function | it is what makes GRPO possible here |
 
 The ladder is meant to go SFT, then preference optimisation, then RL. SFT teaches a behaviour, DPO
@@ -223,15 +226,55 @@ The error breakdown says what happened. Before DPO there were no invented identi
 parse failures. Afterwards both came back. DPO undid the grounding habit that fine-tuning had
 taught.
 
-Learning rate 5e-5 is almost certainly too high for DPO on an already converged model. That is
-a diagnosis I have not tested, so this is not evidence that DPO cannot work here. It is evidence
-that DPO on top of an already converged model can damage it.
+Learning rate 5e-5 is almost certainly too high for DPO on an already converged model. That was
+a diagnosis I had not tested, so at that point it was not evidence that DPO cannot work here.
 
-GRPO is unrun. I assumed there was no point, because at 93 percent accuracy nearly every group of
-sampled answers would be entirely correct. That arithmetic was too pessimistic. With 8 generations
-the chance all 8 are right is 0.909 to the 8th, about 0.47, so roughly half of all groups still
-contain a failure and carry a real advantage signal. GRPO is viable here. It is thin, not absent,
-and it is the next thing to run.
+I have since tested it. Re-running the same 1,744 pairs, one epoch, beta 0.1, at learning rate
+5e-6:
+
+| | before DPO | after DPO |
+|---|---:|---:|
+| correct | 102 / 110 | **102 / 110** |
+
+Paired delta 0.000, 95% CI [0.000, 0.000]. The learning rate was the cause of the regression,
+and lowering it removed the damage. It did not produce a gain.
+
+The internal numbers say why. DPO optimised its own objective almost to completion — the margin
+between chosen and rejected grew 190x, and the fraction of pairs it ordered correctly went from
+50% to 99.4%. Held-out accuracy did not move. The probability it assigns to the correct answers
+stayed flat at about -0.2 per token, meaning it never lost confidence in them: the failure mode
+of the 5e-5 run never engaged. Reported honestly, DPO here avoided harm without buying anything,
+because the teaching stage had already saturated this task set.
+
+## GRPO, which also changed nothing
+
+GRPO is now run. The reward is the verifier itself: 1.0 when the completion replays to the
+declared end state, 0.0 otherwise. 200 training prompts, 8 generations each, learning rate 1e-6.
+
+Result at checkpoint 15: 102/110 before, 102/110 after. Paired delta 0.000, CI [0.000, 0.000].
+
+The reason is measurable, and it corrects the estimate I made above. I argued that at 0.909
+per-sample accuracy the chance all 8 samples are correct is about 0.47, so roughly half of
+all groups would still contain a failure and carry advantage signal. The trainer reports the
+true figure:
+
+| | estimated | measured |
+|---|---:|---:|
+| groups with zero reward variance | ~47% | **88.75%** |
+
+The binomial estimate assumes one accuracy shared by every task. In reality difficulty is
+uneven: most training tasks are solved on every attempt, while a minority are failed on most.
+Under that spread, unanimous groups are far more common than the mean accuracy suggests.
+
+So the conclusion is not that GRPO cannot work here, but that **mean accuracy is the wrong
+statistic for predicting whether GRPO has anything to learn from. The per-task success-rate
+distribution is the right one.** With 88.75% of groups unanimous, only about one group in nine
+carried a gradient, and at KL pinned near 1e-6 it changed no answer.
+
+The honest summary of all three stages: teaching by example took the model from 0 to 102 of 110,
+and both alignment stages left that number untouched. The bottleneck is the task set, not the
+learning rate, and not the choice of algorithm.
+
 
 ## The data
 
@@ -335,6 +378,7 @@ tests/
   test_pipeline.py          24 tests
 colab_train_eval.ipynb      train and eval on a free T4
 train_eval_colab.py         the runner behind the notebook
+STORY.md                    how this started, and what the results mean in plain words
 ```
 
 ## License

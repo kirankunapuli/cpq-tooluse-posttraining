@@ -1,0 +1,8 @@
+# JSONL fixtures are read line by line, so a CRLF rewrite breaks json.loads on
+# Windows clones and on any checkout that does not have core.autocrlf=input.
+*.jsonl -text
+*.json -text
+*.py text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.ipynb -text
