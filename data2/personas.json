@@ -1,0 +1,90 @@
+[
+  {
+    "id": "P1",
+    "label": "Enterprise AE",
+    "role": "sales_rep",
+    "max_discount": 20.0,
+    "can_create_product": false,
+    "can_see_list_price": true,
+    "can_override_approval": false,
+    "intents": [
+      "attribute_quote",
+      "bulk_stage_update",
+      "followup_task"
+    ],
+    "share": 0.3
+  },
+  {
+    "id": "P2",
+    "label": "Sales Manager",
+    "role": "sales_manager",
+    "max_discount": 35.0,
+    "can_create_product": false,
+    "can_see_list_price": true,
+    "can_override_approval": true,
+    "intents": [
+      "approval_decision",
+      "attribute_quote",
+      "escalation"
+    ],
+    "share": 0.15
+  },
+  {
+    "id": "P3",
+    "label": "Partner Reseller",
+    "role": "partner",
+    "max_discount": 15.0,
+    "can_create_product": false,
+    "can_see_list_price": false,
+    "can_override_approval": false,
+    "intents": [
+      "attribute_quote",
+      "partner_pricing_query",
+      "followup_task"
+    ],
+    "share": 0.2
+  },
+  {
+    "id": "P4",
+    "label": "Customer Admin",
+    "role": "customer_admin",
+    "max_discount": 10.0,
+    "can_create_product": true,
+    "can_see_list_price": true,
+    "can_override_approval": false,
+    "intents": [
+      "product_onboarding",
+      "subscription_resize",
+      "missing_info"
+    ],
+    "share": 0.15
+  },
+  {
+    "id": "P5",
+    "label": "Finance Analyst",
+    "role": "finance",
+    "max_discount": 0.0,
+    "can_create_product": false,
+    "can_see_list_price": true,
+    "can_override_approval": false,
+    "intents": [
+      "attribute_quote",
+      "missing_info"
+    ],
+    "share": 0.12
+  },
+  {
+    "id": "P6",
+    "label": "Procurement Buyer",
+    "role": "buyer",
+    "max_discount": 0.0,
+    "can_create_product": false,
+    "can_see_list_price": false,
+    "can_override_approval": false,
+    "intents": [
+      "missing_info",
+      "attribute_quote"
+    ],
+    "share": 0.08
+  }
+]
