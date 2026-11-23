@@ -1,0 +1,112 @@
+{
+  "base_price": {
+    "PROD-PHONE-X": 79900.0,
+    "PROD-LAPTOP-Y": 145000.0
+  },
+  "attribute_deltas": [
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "storage",
+      "value": "128GB",
+      "delta": 0.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "storage",
+      "value": "256GB",
+      "delta": 15000.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "storage",
+      "value": "512GB",
+      "delta": 45000.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "storage",
+      "value": "1TB",
+      "delta": 80000.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "colour",
+      "value": "black",
+      "delta": 0.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "colour",
+      "value": "white",
+      "delta": 0.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "colour",
+      "value": "blue",
+      "delta": 6000.0
+    },
+    {
+      "product_id": "PROD-PHONE-X",
+      "attribute": "colour",
+      "value": "titanium",
+      "delta": 25000.0
+    },
+    {
+      "product_id": "PROD-LAPTOP-Y",
+      "attribute": "memory",
+      "value": "16GB",
+      "delta": 0.0
+    },
+    {
+      "product_id": "PROD-LAPTOP-Y",
+      "attribute": "memory",
+      "value": "32GB",
+      "delta": 22000.0
+    },
+    {
+      "product_id": "PROD-LAPTOP-Y",
+      "attribute": "memory",
+      "value": "64GB",
+      "delta": 60000.0
+    },
+    {
+      "product_id": "PROD-LAPTOP-Y",
+      "attribute": "warranty",
+      "value": "1yr",
+      "delta": 0.0
+    },
+    {
+      "product_id": "PROD-LAPTOP-Y",
+      "attribute": "warranty",
+      "value": "3yr",
+      "delta": 18000.0
+    }
+  ],
+  "quantity_tiers": [
+    {
+      "min_qty": 1,
+      "pct": 0.0
+    },
+    {
+      "min_qty": 50,
+      "pct": 3.0
+    },
+    {
+      "min_qty": 250,
+      "pct": 8.0
+    },
+    {
+      "min_qty": 1000,
+      "pct": 15.0
+    },
+    {
+      "min_qty": 5000,
+      "pct": 20.0
+    }
+  ],
+  "seasonal": {
+    "month": 12,
+    "extra_pct": 2.0
+  }
+}
