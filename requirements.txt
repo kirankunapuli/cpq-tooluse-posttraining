@@ -1,0 +1,9 @@
+# Only needed for the model-training steps. The data pipeline, verifier and eval
+# harness are stdlib-only, so `python build/generate.py` etc. run anywhere.
+torch>=2.4
+transformers>=4.45
+datasets>=3.0
+peft>=0.13
+trl>=0.12
+accelerate>=1.0
+bitsandbytes>=0.44; sys_platform == "linux"

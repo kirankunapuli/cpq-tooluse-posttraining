@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+.hf/
+runs/
+predictions*.jsonl
+base_preds.json
+results.json
+adapter/
+.DS_Store
+.ipynb_checkpoints/
