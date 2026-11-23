@@ -30,8 +30,9 @@ each one needs, and that is where most of the engineering effort actually goes.
 
 The ladder is meant to go SFT, then preference optimisation, then RL. SFT teaches a behaviour, DPO
 shifts it toward what you prefer, GRPO explores beyond what your data covers. Running them in order
-is normal. Assuming each one helps is not, which is why the DPO row above reports a regression
-rather than a win.
+is normal. Assuming each one helps is not. Here SFT did all the work, and both alignment stages
+left the score exactly where they found it: DPO after its learning rate was corrected, GRPO because
+almost no sampled group carried a signal.
 
 ## The idea
 
@@ -274,7 +275,6 @@ carried a gradient, and at KL pinned near 1e-6 it changed no answer.
 The honest summary of all three stages: teaching by example took the model from 0 to 102 of 110,
 and both alignment stages left that number untouched. The bottleneck is the task set, not the
 learning rate, and not the choice of algorithm.
-
 
 ## The data
 
