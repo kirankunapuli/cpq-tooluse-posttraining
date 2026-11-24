@@ -303,6 +303,44 @@ Setup: Qwen2.5-1.5B-Instruct in 4 bit, LoRA rank 16 alpha 32 on all linear layer
 learning rate 2e-4, effective batch 16, max length 2048, prompt masked so loss falls only on
 the answer. 872 examples, 4.97M tokens, one A100.
 
+## The two components that are not the adapter
+
+The adapter is the smallest part of this system, so two supporting components ship with
+their own measurements.
+
+**The scope gate** (`build/scope_gate.py`) stops the model answering anything that is not
+this domain. Three layers: fixed patterns for injection and authority claims, a logistic
+regression over character n-grams and word features trained by SGD, and a reject-option
+band that asks a question instead of guessing. Evaluated on 240 utterances drawn from
+**eight template families held out of training**:
+
+| | |
+|---|---:|
+| in-scope requests acted on | 120 / 120 |
+| out-of-scope requests refused | 120 / 120 |
+| out-of-scope requests that reached a tool | 0 |
+| free-text probes, never used for fitting | 11 / 12 right, 0 leaked |
+
+Masking entities before classification, so an unseen customer name becomes a
+placeholder, moved in-scope recall from 108 to 120. Without it a real customer whose
+name the model had not seen could have their own quote refused.
+
+**The rule index** (`build/retrieval.py`) is the one channel that uses text search.
+BM25 over 31 policy documents, a character n-gram channel for typos and morphology,
+fused by reciprocal rank. 38 labelled queries:
+
+| arm | R@1 | R@3 | MRR |
+|---|---:|---:|---:|
+| BM25 only | 0.895 | 0.974 | 0.941 |
+| BM25 + char n-grams, interleaved | 0.895 | 1.000 | 0.947 |
+| **BM25 + char n-grams, RRF** (shipped) | **0.947** | **1.000** | **0.974** |
+| RRF + coverage reranker | 0.868 | 1.000 | 0.925 |
+
+The reranker loses three queries and is wrong on all three, because term coverage cannot
+cross a synonym: "which model made this quote" has to reach the document about adapter
+version pinning, and no lexical overlap gets it there. It stays in the code, out of the
+shipped path, with the number next to it.
+
 ## What this does not measure
 
 - The split is by customer, so no account appears twice, but **14.7% of training rows share a
