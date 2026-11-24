@@ -303,43 +303,87 @@ Setup: Qwen2.5-1.5B-Instruct in 4 bit, LoRA rank 16 alpha 32 on all linear layer
 learning rate 2e-4, effective batch 16, max length 2048, prompt masked so loss falls only on
 the answer. 872 examples, 4.97M tokens, one A100.
 
-## The two components that are not the adapter
+## The three components that are not the adapter
 
-The adapter is the smallest part of this system, so two supporting components ship with
+The adapter is the smallest part of this system, so three supporting components ship with
 their own measurements.
 
 **The scope gate** (`build/scope_gate.py`) stops the model answering anything that is not
-this domain. Three layers: fixed patterns for injection and authority claims, a logistic
-regression over character n-grams and word features trained by SGD, and a reject-option
-band that asks a question instead of guessing. Evaluated on 240 utterances drawn from
-**eight template families held out of training**:
+this domain. Three layers: fixed patterns for injection and authority claims, two
+classifiers whose probabilities are averaged, and a reject-option band that asks a question
+instead of guessing. One classifier reads hashed character 3 to 5-grams and word features,
+the other reads `BAAI/bge-small-en-v1.5` embeddings; both are logistic regression.
+Evaluated on 240 utterances drawn from **eight template families held out of training**:
 
-| | |
-|---|---:|
-| in-scope requests acted on | 120 / 120 |
-| out-of-scope requests refused | 120 / 120 |
-| out-of-scope requests that reached a tool | 0 |
-| free-text probes, never used for fitting | 11 / 12 right, 0 leaked |
+| classifier | in scope acted on | out of scope refused | leaked | probes | reject band |
+|---|---:|---:|---:|---:|---|
+| character n-grams only | 120 / 120 | 120 / 120 | 0 | 11 / 12 | [0.705, 0.825] |
+| embeddings only | 118 / 120 | 119 / 120 | 0 | 10 / 12 | [0.365, 0.485] |
+| **mean of the two** (shipped) | **120 / 120** | **120 / 120** | **0** | **11 / 12** | **[0.565, 0.685]** |
+
+The mean ties the n-gram channel on accuracy, so accuracy is not the reason to ship it.
+Margin is. The band is where the gate declines to decide, and the shipped gate's band sits
+nearer the middle, so unseen text has further to fall before it lands in it. The encoder is
+already resident for retrieval, so the second opinion costs one forward pass. Embeddings
+alone is the weakest arm and the only one that loses a probe.
 
 Masking entities before classification, so an unseen customer name becomes a
 placeholder, moved in-scope recall from 108 to 120. Without it a real customer whose
 name the model had not seen could have their own quote refused.
 
-**The rule index** (`build/retrieval.py`) is the one channel that uses text search.
-BM25 over 31 policy documents, a character n-gram channel for typos and morphology,
-fused by reciprocal rank. 38 labelled queries:
+**The rule index** (`build/retrieval.py`) is the one channel that uses text search. BM25
+over 31 policy documents, a character n-gram channel for typos and morphology, a dense
+channel over bge-small embeddings, all fused by reciprocal rank, then an optional
+cross-encoder. 38 labelled queries:
 
 | arm | R@1 | R@3 | MRR |
 |---|---:|---:|---:|
 | BM25 only | 0.895 | 0.974 | 0.941 |
-| BM25 + char n-grams, interleaved | 0.895 | 1.000 | 0.947 |
-| **BM25 + char n-grams, RRF** (shipped) | **0.947** | **1.000** | **0.974** |
-| RRF + coverage reranker | 0.868 | 1.000 | 0.925 |
+| BM25 + char n-grams, RRF | 0.947 | 1.000 | 0.974 |
+| BM25 + dense, RRF | 0.921 | 1.000 | 0.961 |
+| **all three, RRF** (shipped) | **0.974** | **1.000** | **0.987** |
+| all three + coverage reranker | 0.895 | 1.000 | 0.943 |
+| all three + cross-encoder reranker | 0.974 | 1.000 | 0.987 |
 
-The reranker loses three queries and is wrong on all three, because term coverage cannot
-cross a synonym: "which model made this quote" has to reach the document about adapter
-version pinning, and no lexical overlap gets it there. It stays in the code, out of the
-shipped path, with the number next to it.
+The coverage reranker loses three queries and is wrong on all three, because term coverage
+cannot cross a synonym: "which model made this quote" has to reach the document about
+adapter version pinning, and no lexical overlap gets it there. The dense channel is what
+fixes that class of query. The cross-encoder ties fusion and changes exactly two answers:
+it fixes "can I approve my own quote" and breaks "how do I know which model made this
+quote", where it prefers a passage about order lines to the version pinning document. Same
+score, one traded for the other, so both rerankers stay in the code, out of the shipped
+path, with the number next to them.
+
+faiss is used above 2000 documents and skipped below it. At 32 documents the exhaustive
+inner product is a 32x384 matrix multiply, and loading faiss next to torch aborts the
+process with OMP #15 because both link libomp.
+
+**The messy-input parser** (`build/input_normalizer.py`) is the front door. Every other
+file here assumed a clean request; this one starts from
+`quote 3 hundred prod phon x 512 gb titanum, 20 pct off, bellows collage`. Resolution runs
+in three tiers, cheapest first, and each tier records how it resolved so the trace can show
+the reasoning:
+
+| tier | what it does | why it is not a guess |
+|---|---|---|
+| 1, exact | normalised form or a known alias. `512` becomes `512GB`, `1.2k` becomes 1200 | nothing is inferred, the alias table is what is matched |
+| 2, fuzzy | edit distance above a threshold. `prod phon x` becomes `PROD-PHONE-X`, `lytware` becomes `Litware Inc` | identifiers and names only, never numbers |
+| 3, ambiguous | two candidates above threshold, or none. Nothing is chosen | the slot is flagged and the caller asks |
+
+| check | result |
+|---|---:|
+| unit checks in the file | 33 / 33 |
+| messy requests that fully resolve | 10 / 10 |
+| slots resolved to a wrong value | 0 |
+| requests that must be questioned, resolved silently | 0 / 4 |
+
+The dangerous error is not a refusal, it is a confident wrong resolution:
+`PROD-PHON-X` resolving to PROD-PHONE-X is fine, resolving to PROD-HUB-Z would price the
+wrong product in silence. Two real bugs came out of writing it. Number search read
+attribute values as quantities, so `512 gb` became a request for 512 units, until spans
+already claimed by a capacity, a percentage or an identifier were protected. And account
+matching compared the whole sentence against the whole legal name, diluting `lytware` to
+0.706 against `Litware Inc`; it compares words to words now.
 
 ## What this does not measure
 
@@ -356,7 +400,7 @@ shipped path, with the number next to it.
   ground truth is known, so the checker is the only thing under test. Swapping a model in is
   one function.
 
-## Three bugs worth knowing about
+## Bugs worth knowing about
 
 Each one survived a casual read of my own code. Each is now a test.
 
@@ -365,6 +409,8 @@ Each one survived a casual read of my own code. Each is now a test.
 | Mutations silently did nothing | 91% yield, which was fiction. Real figure 33%. | Apply the mutation or fail loudly |
 | Goal check instead of state check | 185 traces with unrequested actions counted as correct | Compare the whole before and after change |
 | Standard decontamination | Deleted an entire task family, because one instruction template per family made every example look alike | Write varied phrasings instead of filtering |
+| A number is a number until you know what it is attached to | `512 gb` read as a request for 512 units | Protect spans already claimed by a capacity, a percentage or an identifier, and refuse to match a quantity inside one |
+| Comparing a sentence to a legal name | `lytware` scored 0.706 against `Litware Inc`, so a one character typo fell under the threshold | Compare words to words; a corporate suffix is not evidence about which company someone meant |
 
 ## Run it
 
@@ -410,10 +456,14 @@ build/
   make_preference_pairs.py  rejections -> preference pairs
   train_qlora.py            fine-tuning: inspect, train, predict
   train_align.py            DPO and GRPO from the fine-tuned checkpoint
+  scope_gate.py             three layer domain gate, two classifiers, calibrated band
+  retrieval.py              three channel retrieval, RRF, optional cross-encoder
+  input_normalizer.py       messy request -> slots in three tiers, or a question
+  _model_cache.py           the two small encoders, loaded once
 eval/
   harness.py                executes predictions, Wilson intervals, paired bootstrap
 tests/
-  test_pipeline.py          24 tests
+  test_pipeline.py          34 tests, runs on a bare interpreter
 colab_train_eval.ipynb      train and eval on a free T4
 train_eval_colab.py         the runner behind the notebook
 STORY.md                    how this started, and what the results mean in plain words

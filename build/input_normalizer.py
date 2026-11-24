@@ -546,10 +546,16 @@ def trace(text: str) -> dict:
     }
 
 
-TRACE_SET = [t for t, _ in MESSY] + [t for t, _ in MUST_ASK] + [
-    "40 tablets for lytware, 128 gig, blu",
-    "quote 250 prod tablit w 1 tb titanum for consolodated messenger",
-]
+def _dedupe(texts: Iterable[str]) -> list[str]:
+    seen, out = set(), []
+    for t in texts:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+TRACE_SET = _dedupe([t for t, _ in MESSY] + [t for t, _ in MUST_ASK])
 
 
 def _dump_json() -> int:
