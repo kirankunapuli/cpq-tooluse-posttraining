@@ -240,7 +240,7 @@ I have since tested it. Re-running the same 1,744 pairs, one epoch, beta 0.1, at
 Paired delta 0.000, 95% CI [0.000, 0.000]. The learning rate was the cause of the regression,
 and lowering it removed the damage. It did not produce a gain.
 
-The internal numbers say why. DPO optimised its own objective almost to completion — the margin
+The internal numbers say why. DPO optimised its own objective almost to completion: the margin
 between chosen and rejected grew 190x, and the fraction of pairs it ordered correctly went from
 50% to 99.4%. Held-out accuracy did not move. The probability it assigns to the correct answers
 stayed flat at about -0.2 per token, meaning it never lost confidence in them: the failure mode
