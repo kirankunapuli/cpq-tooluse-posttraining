@@ -376,6 +376,15 @@ def check_page() -> None:
         ("retrieval recall@1 on the page", "0.974"),
         ("retrieval MRR on the page", "0.987"),
         ("BM25 baseline on the page", "0.895"),
+        ("proposals gated on the page", "3,300"),
+        ("defects caught on the page", "2,200"),
+        ("clean traces passed on the page", "1,100"),
+        ("preference pairs on the page", "2,180"),
+        ("SFT result on the page", "102 of 110"),
+        ("DPO regression on the page", "68 of 110"),
+        ("group reward variance on the page", "88.75"),
+        ("BM25 to fusion lift on the page", "0.947"),
+        ("ordered tool calls on the page", "157"),
     ]
     for claim, needle in must:
         CHECKS.append(Check(claim, needle, page.name, "ASSERT", needle in html))
