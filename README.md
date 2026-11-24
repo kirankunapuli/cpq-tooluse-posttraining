@@ -306,7 +306,7 @@ the answer. 872 examples, 4.97M tokens, one A100.
 ## The three components that are not the adapter
 
 The adapter is the smallest part of this system, so three supporting components ship with
-their own measurements.
+their own measurements, plus one measurement of a component that does not ship.
 
 **The scope gate** (`build/scope_gate.py`) stops the model answering anything that is not
 this domain. Three layers: fixed patterns for injection and authority claims, two
@@ -384,6 +384,49 @@ attribute values as quantities, so `512 gb` became a request for 512 units, unti
 already claimed by a capacity, a percentage or an identifier were protected. And account
 matching compared the whole sentence against the whole legal name, diluting `lytware` to
 0.706 against `Litware Inc`; it compares words to words now.
+
+## A decision model, measured where it helps and where it does not
+
+[Laya](https://huggingface.co/convaiinnovations/laya) is a non-autoregressive System 1 decision
+model: a ModernBERT encoder plus a decision head, `pip install laya`, no text generated. It answers
+typed questions with calibrated probabilities. `noul` gives a calibrated P(true) for a yes or no
+statement; `choice` gives a distribution over options with a conformal prediction set. It is
+trained with RL against a strictly proper scoring rule, so an honest probability is the only way it
+scores.
+
+`build/laya_gate.py` measures it on the gate, on the same 240 held-out utterances and the same 12
+probes as the ensemble, with the regex layer in front of every arm:
+
+| arm | in scope | out of scope | leaked | free-text probes |
+|---|---:|---:|---:|---|
+| Laya zero-shot, one `noul` question | 120 / 120 | 120 / 120 | 0 | 10 / 12, 1 leak |
+| Laya, head fitted on confirmed answers, temperatures calibrated | 120 / 120 | 120 / 120 | 0 | 11 / 12, 1 leak |
+| **character n-grams plus embeddings** (shipped) | **120 / 120** | **120 / 120** | **0** | **11 / 12, 0 leaks** |
+
+All three tie on the structural half. They separate on the 12 probes, which nobody trained on.
+Fitting a head on 720 confirmed answers took **897 seconds on CPU** with no gradient step and no
+GPU, and 1,392 seconds on an earlier run while the machine was busy. Both are slower than the model
+card's 34 seconds for 300 answers on 8 threads, and both are jobs that fit in a release window
+rather than a training budget.
+
+`build/laya_resolve.py` measures it on the front door, where the question is which product and
+which customer a sloppy sentence means. There it loses:
+
+| | Laya `choice` | the parser |
+|---|---:|---:|
+| product named correctly, 8 resolvable requests | 4 / 8 | 8 / 8 |
+| customer named correctly | 4 / 8 | 8 / 8 |
+| named wrongly | 0 | 0 |
+| ms per slot on CPU | 282 | under 1 |
+
+`prod phon x`, `lytware` and `5OO` are character-level noise. An encoder normalises that away;
+an explicit edit distance on the identifier keeps it. It is safe rather than accurate, because it
+declines instead of naming a wrong one, and a string problem stays a string problem.
+
+So the decision model belongs at the gate, and at the reviewer where the question is a calibrated
+yes or no about a plan. It does not belong where the question is which of four identifiers an OCR
+error was reaching for. The gate ships with both paths: Laya when the model is present, the
+ensemble when it is not, since the fallback answers in 0.1 ms and needs no download.
 
 ## What this does not measure
 

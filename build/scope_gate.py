@@ -375,6 +375,44 @@ class EmbedModel:
 
 
 @dataclass
+class LayaScorer:
+    """P(in scope) from a decision model instead of from a classifier fitted here.
+
+    Laya answers a `noul` question with a calibrated probability, which is the same quantity the
+    two local classifiers produce, so it drops into the same gate. The threshold is still
+    calibrated here, on a validation split, because the right operating point depends on the cost
+    of the two errors in this system and not on the model's own defaults.
+
+    The checkpoint is about 1.7 GB on first download. That is why this is opt-in: a request path
+    that cannot start without a 1.7 GB download is not a request path, and the ensemble fallback
+    answers in a tenth of a millisecond.
+    """
+
+    QUESTION = ("Is this request work on Revenue Cloud quote, pricing, approval "
+                "or subscription objects?")
+
+    def __init__(self, model: str = "english"):
+        self._model = model
+        self._router = None
+
+    def _load(self):
+        if self._router is None:
+            from laya import Router
+            self._router = Router(default=self._model)
+        return self._router
+
+    def proba(self, text: str) -> float:
+        out = self._load().predict(text, {"in_scope": {"type": "noul",
+                                                      "instructions": self.QUESTION}})
+        return float(out["answers"]["in_scope"]["noul"])
+
+
+def laya_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("laya") is not None
+
+
+@dataclass
 class Verdict:
     decision: str          # "act" | "refuse" | "ask"
     layer: str             # where the decision came from
@@ -399,15 +437,18 @@ class ScopeGate:
         # before it lands in the reject band. The encoder is already resident for
         # retrieval, so the marginal cost is one forward pass, not a second model.
         if backend == "auto":
+            # auto never picks laya. A gate that needs a 1.7 GB download to answer is not a
+            # fallback, it is a dependency, and the ensemble answers in 0.1 ms without one.
             import _model_cache
             backend = "ensemble" if _model_cache.available() else "ngram"
-        if backend not in ("ngram", "embed", "ensemble"):
+        if backend not in ("ngram", "embed", "ensemble", "laya"):
             raise ValueError(backend)
         self.backend = backend
         self.low, self.high = low, high
         self.vec = Vectorizer()
         self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120)
-        self.emb = EmbedModel() if backend != "ngram" else None
+        self.emb = EmbedModel() if backend in ("embed", "ensemble") else None
+        self.laya = LayaScorer() if backend == "laya" else None
         self.fitted = False
         self.calibration = {}
 
@@ -415,6 +456,8 @@ class ScopeGate:
         """One probability in [0, 1]. Both channels are calibrated probabilities, so
         the ensemble is their mean and needs no further scaling."""
         masked = mask_entities(text) if self.mask else text
+        if self.backend == "laya":
+            return self.laya.proba(text)
         if self.backend == "embed":
             return self.emb.proba(text)
         p_ng = self.clf.proba(self.vec.transform(masked))
@@ -432,11 +475,14 @@ class ScopeGate:
 
         fit_texts = [r[0] for r in fit_rows]
         y = [1 if r[1] == "in" else 0 for r in fit_rows]
-        self.vec.fit(mask_entities(t) if self.mask else t for t in fit_texts)
-        self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120).fit(
-            [self._features(t) for t in fit_texts], y)
-        if self.emb is not None:
-            self.emb.fit(fit_texts, y)
+        if self.backend != "laya":
+            self.vec.fit(mask_entities(t) if self.mask else t for t in fit_texts)
+            self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120).fit(
+                [self._features(t) for t in fit_texts], y)
+            if self.emb is not None:
+                self.emb.fit(fit_texts, y)
+        # A decision model needs no fitting here. Only the threshold is calibrated, in
+        # _calibrate, on the same validation split the other backends use.
         self.fitted = True
         self._calibrate(val_rows, margin)
         return self

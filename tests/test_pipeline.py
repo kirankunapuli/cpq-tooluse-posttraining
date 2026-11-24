@@ -575,6 +575,24 @@ def test_normalizer_reads_a_quantity_the_way_a_person_wrote_it():
     assert parse_quantity("1,200 units")[0] == 1200
 
 
+def test_scope_gate_offers_a_decision_model_without_loading_it():
+    """The laya backend must be constructible on a machine with no checkpoint, because the
+    fallback is what answers when the 1.7 GB download is not there."""
+    from scope_gate import ScopeGate, laya_available
+
+    gate = ScopeGate(backend="laya")
+    assert gate.laya is not None
+    assert gate.emb is None              # no local classifier is built for this backend
+    assert isinstance(laya_available(), bool)
+
+
+def test_scope_gate_auto_never_picks_the_decision_model():
+    """A gate that needs a model download to answer is a dependency, not a fallback."""
+    from scope_gate import ScopeGate
+
+    assert ScopeGate().backend in ("ensemble", "ngram")
+
+
 def test_retrieval_matches_an_identifier_exactly():
     """A near miss on a product identifier is a wrong product, so ids never fuzz."""
     from retrieval import CORPUS, RuleIndex
