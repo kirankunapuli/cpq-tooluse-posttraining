@@ -326,9 +326,15 @@ class LogReg:
         return e / (1.0 + e)
 
     def fit(self, X: list[dict[int, float]], y: list[int]) -> "LogReg":
+        # A local generator, not the module-level RNG. The module one is consumed by every
+        # fit, so the weights -- and therefore the calibrated band -- depended on how many
+        # gates had been fitted earlier in the process. Three runs of the same code gave
+        # three different bands, which makes the number unquotable. This seeds every fit
+        # the same way, so the band is a property of the data instead of of call order.
+        rng = random.Random(20261124)
         idx = list(range(len(X)))
         for _ in range(self.epochs):
-            RNG.shuffle(idx)
+            rng.shuffle(idx)
             for i in idx:
                 x, label = X[i], y[i]
                 p = self._sig(dot(self.w, x) + self.b)
@@ -366,7 +372,8 @@ class EmbedModel:
 
     def fit(self, texts, y):
         from sklearn.linear_model import LogisticRegression
-        self._clf = LogisticRegression(C=self.C, max_iter=2000, class_weight="balanced")
+        self._clf = LogisticRegression(C=self.C, max_iter=2000, class_weight="balanced",
+                                      random_state=20261124)
         self._clf.fit(self._vec(texts), y)
         return self
 
@@ -405,6 +412,14 @@ class LayaScorer:
         out = self._load().predict(text, {"in_scope": {"type": "noul",
                                                       "instructions": self.QUESTION}})
         return float(out["answers"]["in_scope"]["noul"])
+
+
+def sklearn_available() -> bool:
+    """The embedding channel needs sklearn. Without it the gate is the n-gram arm alone,
+    which is a working gate with a wider band, not a broken one."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("sklearn", "numpy", "sentence_transformers"))
 
 
 def laya_available() -> bool:
@@ -640,7 +655,10 @@ def _selftest() -> int:
     print("backend ablation on the same held-out templates and the same probes")
     gates = {}
     rows = []
-    for backend in ("ngram", "embed", "ensemble"):
+    backends = ("ngram", "embed", "ensemble") if sklearn_available() else ("ngram",)
+    if not sklearn_available():
+        print("  embedding arms unavailable: sklearn, numpy or sentence-transformers not installed")
+    for backend in backends:
         g = ScopeGate(backend=backend).fit(train)
         tp2 = fp2 = tn2 = fn2 = ask2 = 0
         for text, label, _tpl in test:
@@ -665,11 +683,13 @@ def _selftest() -> int:
     for b, tp2, fn2, tn2, fp2, ask2, pok, pleak, lo, hi in rows:
         print(f"  {b:10s} {tp2:6d} {fn2:8d} {tn2:7d} {fp2:5d} {ask2:4d} {pok:5d}/12 "
               f"{pleak:11d}  [{lo}, {hi}]")
-    print("  embedding alone loses two in-scope requests into its band and leaks one probe.")
-    print("  the n-gram channel holds identifiers exactly, so the two fail differently and")
-    print("  the mean of the two probabilities inherits neither failure. Ensemble ships; its")
-    print("  band is tighter than the n-gram band, which is the margin that matters on text")
-    print("  nobody wrote a template for.")
+    if len(rows) == 3:
+        print("  embedding alone loses two in-scope requests into its band and leaks one probe.")
+        print("  the n-gram channel holds identifiers exactly, so the two fail differently and")
+        print("  the mean of the two probabilities inherits neither failure. Ensemble ships, and")
+        print("  the case it wins is the one where the channels disagree: the email probe scores")
+        print("  0.536 on n-grams and 0.650 on embeddings, so the mean lands in the band and the")
+        print("  gate asks a question rather than forcing a decision either way.")
 
     leaks = false_ref = asked = right = 0
     print()

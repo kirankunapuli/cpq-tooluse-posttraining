@@ -467,25 +467,36 @@ def make_tasks(records: dict[str, PriceRecord], seed: int = 11) -> list[TaskV2]:
 # --------------------------------------------------------------------------------------
 
 def score_tool_calls(task: TaskV2, predicted: list[dict]) -> dict:
-    """Tool-level metrics, because end-to-end accuracy hides which tool failed."""
+    """Tool-level metrics, because end-to-end accuracy hides which tool failed.
+
+    Three properties, and they are deliberately separate because they fail separately:
+
+      sequence_ok  the right tools, in the right order
+      args_ok      the right arguments, which is where a wrong quantity or a wrong price
+                   book entry lives. Name-only comparison cannot see either, and a checker
+                   that cannot see them will score a fluent wrong quote as correct.
+      provenance   every priced line traces to a lookup that was actually made
+    """
     gold = [c["name"] for c in task.gold_calls]
     pred = [c["name"] for c in (predicted or [])]
     if task.expected_outcome == "refused":
         ok = not pred
         return {"correct": ok, "tool_precision": 1.0 if ok else 0.0,
-                "tool_recall": 1.0 if ok else 0.0, "sequence_ok": ok}
+                "tool_recall": 1.0 if ok else 0.0, "sequence_ok": ok, "args_ok": ok}
     tp = sum(1 for a, b in zip(gold, pred) if a == b)
     precision = tp / len(pred) if pred else 0.0
     recall = tp / len(gold) if gold else 1.0
     seq_ok = gold == pred
+    args_ok = [dict(c.get("arguments") or {}) for c in task.gold_calls] == \
+              [dict(c.get("arguments") or {}) for c in (predicted or [])]
     # provenance: every priced argument must match a declared lookup
     prov_ok = True
     if task.required_lookups:
         want = task.required_lookups[0]
         lp = next((c for c in (predicted or []) if c.get("name") == "get_price"), None)
         prov_ok = bool(lp) and lp.get("arguments", {}).get("product_id") == want["product_id"]
-    return {"correct": seq_ok and prov_ok, "tool_precision": round(precision, 3),
-            "tool_recall": round(recall, 3), "sequence_ok": seq_ok,
+    return {"correct": seq_ok and args_ok and prov_ok, "tool_precision": round(precision, 3),
+            "tool_recall": round(recall, 3), "sequence_ok": seq_ok, "args_ok": args_ok,
             "provenance_ok": prov_ok}
 
 
@@ -586,6 +597,28 @@ def selftest() -> int:
     no_price, why2 = check_stage_order([{"name": "create_quote", "arguments": {}},
                                         {"name": "add_quote_line_item", "arguments": {}}])
     checks.append(("priced line without get_price rejected", not no_price))
+    # the hole this closed: a fluent quote with a stale price keeps every tool name and every
+    # tool position intact, so a name-only comparison scored it correct. Arguments are part of
+    # the answer, and this is the defect class the corpus exists to catch.
+    acted = next(t for t in tasks
+                 if t.family == "attribute_quote" and t.expected_outcome == "acted")
+
+    def corrupt(field, value):
+        out = []
+        for c in acted.gold_calls:
+            args = dict(c.get("arguments") or {})
+            if c["name"] == "add_quote_line_item":
+                args[field] = value
+            out.append({"name": c["name"], "arguments": args})
+        return out
+
+    checks.append(("same names, stale price rejected",
+                   score_tool_calls(acted, corrupt("unit_price", 1.0))["correct"] is False))
+    checks.append(("same names, wrong quantity rejected",
+                   score_tool_calls(acted, corrupt("quantity", 999))["correct"] is False))
+    checks.append(("acted quote scores correct on its own gold",
+                   score_tool_calls(acted, acted.gold_calls)["correct"] is True))
+
     oos = next(t for t in tasks if t.family == "out_of_scope")
     checks.append(("acting on out_of_scope fails",
                    score_tool_calls(oos, [{"name": "list_invoices", "arguments": {}}])

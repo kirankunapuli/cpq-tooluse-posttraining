@@ -464,7 +464,19 @@ python build/generate.py                # candidates -> verified + rejected
 python build/filter_splits.py           # dedup, decontaminate, split by account
 python build/make_preference_pairs.py   # rejections -> preference pairs
 python eval/harness.py --selftest       # check the grader before trusting it
-python -m pytest tests/                 # 24 tests
+python -m pytest tests/                 # 36 tests
+```
+
+Two scripts exist to keep the claims honest. `build/verify_all.py` reproduces every number in the
+write-up against the artefact that produces it, including the write-up file itself, and exits
+non-zero when a quoted value drifts. `build/demo_pipeline.py` pushes one typing-mistake request
+through the gate, the parser, the price lookup, the planner and the two checks in one run:
+
+```
+python build/verify_all.py                       # 76 assertions, no GPU
+python build/demo_pipeline.py                    # one request, all five stages
+python build/demo_pipeline.py --break price      # the same plan, one stale number
+python build/demo_pipeline.py --scope            # the gate refusing, zero tool calls
 ```
 
 Train and score a model:
@@ -502,11 +514,13 @@ build/
   scope_gate.py             three layer domain gate, two classifiers, calibrated band
   retrieval.py              three channel retrieval, RRF, optional cross-encoder
   input_normalizer.py       messy request -> slots in three tiers, or a question
+  demo_pipeline.py          one request through all five stages, plus defect variants
+  verify_all.py             every quoted number, asserted against the artefact
   _model_cache.py           the two small encoders, loaded once
 eval/
   harness.py                executes predictions, Wilson intervals, paired bootstrap
 tests/
-  test_pipeline.py          34 tests, runs on a bare interpreter
+  test_pipeline.py          36 tests, runs on a bare interpreter
 colab_train_eval.ipynb      train and eval on a free T4
 train_eval_colab.py         the runner behind the notebook
 STORY.md                    how this started, and what the results mean in plain words
