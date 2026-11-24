@@ -317,15 +317,17 @@ Evaluated on 240 utterances drawn from **eight template families held out of tra
 
 | classifier | in scope acted on | out of scope refused | leaked | probes | reject band |
 |---|---:|---:|---:|---:|---|
-| character n-grams only | 120 / 120 | 120 / 120 | 0 | 11 / 12 | [0.705, 0.825] |
+| character n-grams only | 120 / 120 | 120 / 120 | 0 | 11 / 12 | [0.695, 0.815] |
 | embeddings only | 118 / 120 | 119 / 120 | 0 | 10 / 12 | [0.365, 0.485] |
-| **mean of the two** (shipped) | **120 / 120** | **120 / 120** | **0** | **11 / 12** | **[0.565, 0.685]** |
+| **mean of the two** (shipped) | **120 / 120** | **120 / 120** | **0** | **11 / 12** | **[0.535, 0.655]** |
 
-The mean ties the n-gram channel on accuracy, so accuracy is not the reason to ship it.
-Margin is. The band is where the gate declines to decide, and the shipped gate's band sits
-nearer the middle, so unseen text has further to fall before it lands in it. The encoder is
-already resident for retrieval, so the second opinion costs one forward pass. Embeddings
-alone is the weakest arm and the only one that loses a probe.
+The mean ties the n-gram channel on accuracy, so accuracy is not the reason to ship it. The
+two bands are the same width, so neither is safer by construction. What the mean buys shows up
+only when the arms disagree. On the probe "draft me an email to the customer explaining the
+price rise", the n-gram arm scores 0.536 and refuses, the embedding arm scores 0.650 and acts,
+and the mean of 0.593 falls inside the shipped band, so the gate asks one question instead of
+picking a side. The encoder is already resident for retrieval, so that second opinion costs one
+forward pass. Embeddings alone is the weakest arm and the only one that loses a probe.
 
 Masking entities before classification, so an unseen customer name becomes a
 placeholder, moved in-scope recall from 108 to 120. Without it a real customer whose

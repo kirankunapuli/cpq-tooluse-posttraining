@@ -447,10 +447,12 @@ class ScopeGate:
                  backend: str = "auto"):
         # backend is one of ngram, embed, ensemble. Measured on eight held-out template
         # families in _selftest. Ensemble ties the n-gram channel on accuracy and on
-        # leaks; what it buys is margin, with the calibrated band sitting at
-        # [0.565, 0.685] instead of [0.705, 0.825], so unseen text has further to fall
-        # before it lands in the reject band. The encoder is already resident for
-        # retrieval, so the marginal cost is one forward pass, not a second model.
+        # leaks, and its calibrated band [0.535, 0.655] is the same width as the n-gram
+        # band [0.695, 0.815], so neither is safer by construction. What it buys shows up
+        # when the arms disagree: on "draft me an email ... explaining the price rise" the
+        # n-gram arm refuses at 0.536, the embedding arm acts at 0.650, and the mean of
+        # 0.593 lands inside the band, so the gate asks. The encoder is already resident
+        # for retrieval, so that marginal cost is one forward pass, not a second model.
         if backend == "auto":
             # auto never picks laya. A gate that needs a 1.7 GB download to answer is not a
             # fallback, it is a dependency, and the ensemble answers in 0.1 ms without one.
