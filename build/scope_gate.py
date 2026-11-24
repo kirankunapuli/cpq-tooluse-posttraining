@@ -346,6 +346,34 @@ class LogReg:
 # 4. The gate
 # --------------------------------------------------------------------------------------
 
+class EmbedModel:
+    """Logistic regression over bge-small sentence embeddings.
+
+    The vectors are unit length, so the classifier is a single linear layer and the
+    decision boundary is a hyperplane in the same 384 dimensional space the retriever
+    already uses. That is deliberate: one encoder in the process means one model to
+    pin, one model to reload when it changes, and the same embeddings that justify a
+    retrieval hit justify the scope decision.
+    """
+
+    def __init__(self, C: float = 1.0):
+        self.C = C
+        self._clf = None
+
+    def _vec(self, texts):
+        import _model_cache
+        return _model_cache.encode(list(texts))
+
+    def fit(self, texts, y):
+        from sklearn.linear_model import LogisticRegression
+        self._clf = LogisticRegression(C=self.C, max_iter=2000, class_weight="balanced")
+        self._clf.fit(self._vec(texts), y)
+        return self
+
+    def proba(self, text: str) -> float:
+        return float(self._clf.predict_proba(self._vec([text]))[0, 1])
+
+
 @dataclass
 class Verdict:
     decision: str          # "act" | "refuse" | "ask"
@@ -362,12 +390,37 @@ class ScopeGate:
     performance is a threshold that has seen the answer.
     """
 
-    def __init__(self, low: float = 0.30, high: float = 0.70):
+    def __init__(self, low: float = 0.30, high: float = 0.70,
+                 backend: str = "auto"):
+        # backend is one of ngram, embed, ensemble. Measured on eight held-out template
+        # families in _selftest. Ensemble ties the n-gram channel on accuracy and on
+        # leaks; what it buys is margin, with the calibrated band sitting at
+        # [0.565, 0.685] instead of [0.705, 0.825], so unseen text has further to fall
+        # before it lands in the reject band. The encoder is already resident for
+        # retrieval, so the marginal cost is one forward pass, not a second model.
+        if backend == "auto":
+            import _model_cache
+            backend = "ensemble" if _model_cache.available() else "ngram"
+        if backend not in ("ngram", "embed", "ensemble"):
+            raise ValueError(backend)
+        self.backend = backend
         self.low, self.high = low, high
         self.vec = Vectorizer()
         self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120)
+        self.emb = EmbedModel() if backend != "ngram" else None
         self.fitted = False
         self.calibration = {}
+
+    def score(self, text: str) -> float:
+        """One probability in [0, 1]. Both channels are calibrated probabilities, so
+        the ensemble is their mean and needs no further scaling."""
+        masked = mask_entities(text) if self.mask else text
+        if self.backend == "embed":
+            return self.emb.proba(text)
+        p_ng = self.clf.proba(self.vec.transform(masked))
+        if self.backend == "ngram":
+            return p_ng
+        return 0.5 * (p_ng + self.emb.proba(text))
 
     def fit(self, rows, margin: float = 0.06) -> "ScopeGate":
         # carve validation out by template family
@@ -377,10 +430,13 @@ class ScopeGate:
         fit_rows = [r for r in rows if r[2] not in val_fams]
         val_rows = [r for r in rows if r[2] in val_fams] or rows
 
-        self.vec.fit(mask_entities(r[0]) if self.mask else r[0] for r in fit_rows)
-        X = [self._features(r[0]) for r in fit_rows]
+        fit_texts = [r[0] for r in fit_rows]
         y = [1 if r[1] == "in" else 0 for r in fit_rows]
-        self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120).fit(X, y)
+        self.vec.fit(mask_entities(t) if self.mask else t for t in fit_texts)
+        self.clf = LogReg(dim=self.vec.dim, lr=3.0, epochs=120).fit(
+            [self._features(t) for t in fit_texts], y)
+        if self.emb is not None:
+            self.emb.fit(fit_texts, y)
         self.fitted = True
         self._calibrate(val_rows, margin)
         return self
@@ -398,7 +454,7 @@ class ScopeGate:
         out-of-scope request or refusing a real one costs them the request. So the
         band asks. The width is fixed in advance and is not tuned on the probes.
         """
-        scored = [(self.clf.proba(self._features(t)), lab) for t, lab, _ in rows]
+        scored = [(self.score(t), lab) for t, lab, _ in rows]
         ins = [p for p, l in scored if l == "in"]
         outs = [p for p, l in scored if l == "out"]
 
@@ -445,7 +501,7 @@ class ScopeGate:
             return a
         if not self.fitted:
             raise RuntimeError("gate is not fitted")
-        p = self.clf.proba(self._features(text))
+        p = self.score(text)
         if p >= self.high:
             return Verdict("act", "B", "in scope", round(p, 4))
         if p <= self.low:
@@ -492,7 +548,8 @@ def _selftest() -> int:
 
     ok("band is ordered and non-empty", lambda: gate.low < gate.high)
     g2 = ScopeGate()
-    g2.vec, g2.clf, g2.fitted = gate.vec, gate.clf, True
+    g2.vec, g2.clf, g2.emb = gate.vec, gate.clf, gate.emb
+    g2.fitted = True
     g2.low, g2.high = 0.0, 1.0
     ok("fully open band always asks",
        lambda: g2.decide("create a quote for 300 PROD-PHONE-X").decision == "ask")
@@ -533,9 +590,44 @@ def _selftest() -> int:
     print(f"  abstained to a question  {ask}")
     print(f"  calibrated band          [{gate.low}, {gate.high}]")
 
+    print()
+    print("backend ablation on the same held-out templates and the same probes")
+    gates = {}
+    rows = []
+    for backend in ("ngram", "embed", "ensemble"):
+        g = ScopeGate(backend=backend).fit(train)
+        tp2 = fp2 = tn2 = fn2 = ask2 = 0
+        for text, label, _tpl in test:
+            v = g.decide(text)
+            if v.decision == "ask":
+                ask2 += 1
+            elif v.decision == "act":
+                tp2 += label == "in"
+                fp2 += label == "out"
+            else:
+                tn2 += label == "out"
+                fn2 += label == "in"
+        probe_leak = sum(1 for t, l in PROBES
+                         if l == "out" and g.decide(t).decision == "act")
+        probe_ok = sum(1 for t, l in PROBES
+                       if g.decide(t).decision == ("act" if l == "in" else "refuse"))
+        gates[backend] = g
+        rows.append((backend, tp2, fn2, tn2, fp2, ask2, probe_ok, probe_leak, g.low, g.high))
+
+    print(f"  {'backend':10s} {'in ok':>6s} {'in miss':>8s} {'out ok':>7s} {'LEAK':>5s} "
+          f"{'ask':>4s} {'probes':>7s} {'probe leak':>11s}  band")
+    for b, tp2, fn2, tn2, fp2, ask2, pok, pleak, lo, hi in rows:
+        print(f"  {b:10s} {tp2:6d} {fn2:8d} {tn2:7d} {fp2:5d} {ask2:4d} {pok:5d}/12 "
+              f"{pleak:11d}  [{lo}, {hi}]")
+    print("  embedding alone loses two in-scope requests into its band and leaks one probe.")
+    print("  the n-gram channel holds identifiers exactly, so the two fail differently and")
+    print("  the mean of the two probabilities inherits neither failure. Ensemble ships; its")
+    print("  band is tighter than the n-gram band, which is the margin that matters on text")
+    print("  nobody wrote a template for.")
+
     leaks = false_ref = asked = right = 0
     print()
-    print("free-text probes (never used for fitting or calibration):")
+    print("free-text probes, shipped ensemble (never used for fitting or calibration):")
     for text, label in PROBES:
         v = gate.decide(text)
         if v.decision == "ask":

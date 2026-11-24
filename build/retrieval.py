@@ -8,12 +8,19 @@ modes require rather than the way a demo would.
 
 Four stages, each present because the stage before it fails in a specific way:
 
-  1. BM25          exact terms. Finds "APPROVAL-20" and "PROD-PHONE-X" reliably.
-  2. char n-gram   tolerant matching. Finds "discount approvel" and "priceboook".
-  3. RRF fusion    merges the two rankings without needing their scores to be
-                   comparable, which is the whole reason rank fusion is used.
-  4. rerank        term coverage plus title match on the shortlist. Cheap, and it
-                   fixes the case where the keyword hit is a footnote.
+  1. BM25            exact terms. Finds "APPROVAL-20" and "PROD-PHONE-X" reliably.
+  2. char n-gram     tolerant matching. Finds "discount approvel" and "priceboook".
+  3. dense           bge-small-en-v1.5 embeddings over faiss. Finds the query that
+                     shares no word with the answer, which is the failure both lexical
+                     channels have. "how do I know which model made this quote" reaches
+                     the version pinning doc only through meaning.
+  4. cross-encoder   ms-marco-MiniLM rescores the fused shortlist by reading query and
+                     document together. This is the stage that can be wrong, so it is
+                     measured and shipped off unless it wins.
+
+The three channels are merged by reciprocal rank fusion, which needs only their order,
+not their scores. A BM25 score is unbounded, a cosine is in [-1, 1] and a cross-encoder
+score is a raw logit, so nothing but rank is comparable across them.
 
 Every result carries the document id and the section, because the answer has to cite
 what it used and the citation is checked against the number in the output.
@@ -360,6 +367,94 @@ def rerank(docs: list[Doc], query: str, shortlist: list[tuple[int, float]],
 
 
 # --------------------------------------------------------------------------------------
+# Stage 3: dense, embeddings over faiss
+# --------------------------------------------------------------------------------------
+
+FAISS_THRESHOLD = 2000      # below this the dot product in numpy wins on wall clock
+
+
+class DenseIndex:
+    """Meaning-level recall. Loads bge-small on first use, so importing this module
+    stays free for the stdlib-only test runner.
+
+    faiss is available and is what this uses in production, but at 32 documents it is
+    the wrong tool: an exhaustive inner product over 32 unit vectors is a single 32x384
+    matrix multiply, about 12 microseconds, and faiss adds a C call and an index build
+    for the privilege. Worse, faiss links its own libomp and torch links another, so
+    loading both reorders the process into an OMP #15 abort on macOS. Below
+    FAISS_THRESHOLD documents the numpy path is taken and neither problem exists.
+    """
+
+    def __init__(self, docs: list[Doc], model: str | None = None,
+                 backend: str = "auto"):
+        self.docs = docs
+        self._vecs = None
+        self._index = None
+        self._backend = backend
+        self._model = model
+
+    def build(self):
+        import _model_cache
+        if self._model:
+            _model_cache.EMBED_MODEL = self._model
+        self._vecs = _model_cache.encode([d.title + ". " + d.body for d in self.docs])
+        if self._backend == "faiss" or (self._backend == "auto"
+                                        and len(self.docs) >= FAISS_THRESHOLD):
+            import faiss
+            index = faiss.IndexFlatIP(self._vecs.shape[1])   # unit vecs, so IP == cosine
+            index.add(self._vecs)
+            self._index = index
+        return self
+
+    def search(self, query: str, k: int | None = None) -> list[tuple[int, float]]:
+        if self._vecs is None:
+            self.build()
+        import numpy as np
+        import _model_cache
+        q = _model_cache.encode([query])[0]
+        k = min(k or len(self.docs), len(self.docs))
+        if self._index is not None:
+            scores, idxs = self._index.search(q.reshape(1, -1), k)
+            return [(int(i), float(s)) for i, s in zip(idxs[0], scores[0]) if i >= 0]
+        sims = self._vecs @ q
+        order = np.argsort(-sims)[:k]
+        return [(int(i), float(sims[i])) for i in order]
+
+
+# --------------------------------------------------------------------------------------
+# Stage 4b: cross-encoder rerank
+# --------------------------------------------------------------------------------------
+
+def ce_rerank(docs: list[Doc], query: str, shortlist: list[tuple[int, float]],
+              keep_bonus: float = 0.15) -> list[tuple[int, float]]:
+    """Rescore the shortlist by reading the pair together.
+
+    The fused score is kept as a small tie-breaker rather than thrown away, because a
+    cross-encoder on a short query can be confidently wrong (the classic failure is a
+    query naming an identifier that the encoder tokenises into noise). Keeping 15% of
+    the fused rank means the two channels have to disagree before the order flips.
+    """
+    if not shortlist:
+        return shortlist
+    import _model_cache
+    pairs = [(query, docs[i].title + ". " + docs[i].body) for i, _ in shortlist]
+    raw = [float(x) for x in _model_cache.reranker().predict(pairs)]
+
+    def norm(xs):
+        lo, hi = min(xs), max(xs)
+        if hi - lo < 1e-12:
+            return [0.0 for _ in xs]
+        return [(x - lo) / (hi - lo) for x in xs]
+
+    nce = norm(raw)
+    nf = norm([s for _, s in shortlist])
+    out = [(idx, round((1 - keep_bonus) * nce[i] + keep_bonus * nf[i], 6))
+           for i, (idx, _s) in enumerate(shortlist)]
+    out.sort(key=lambda x: -x[1])
+    return out
+
+
+# --------------------------------------------------------------------------------------
 # The channel
 # --------------------------------------------------------------------------------------
 
@@ -374,36 +469,48 @@ class Hit:
 class RuleIndex:
     """The prose channel, with each stage individually switchable so it can be ablated."""
 
-    def __init__(self, docs: list[Doc], use_char: bool = True, use_fuse: bool = True,
-                 use_rerank: bool = False, shortlist: int = 8):
-        # use_rerank defaults off. See the ablation in _selftest: the heuristic reranker
-        # loses three of thirty-eight queries to synonymy, so fusion alone is the shipped
-        # configuration and the reranker is kept for the record.
+    def __init__(self, docs: list[Doc], use_char: bool = True, use_dense="auto",
+                 use_fuse: bool = True, use_rerank: bool = False, use_ce: bool = False,
+                 shortlist: int = 8):
+        # use_ce defaults off. The ablation in _selftest shows it is a wash on this corpus
+        # and a loss on the identifier queries, so fusion is the shipped arm and the
+        # cross-encoder stays one flag away for the corpus where it does pay.
+        if use_dense == "auto":
+            import _model_cache
+            use_dense = _model_cache.available()
         self.docs = docs
         self.bm25 = BM25(docs)
-        self.char = CharIndex(docs)
-        self.use_char, self.use_fuse, self.use_rerank = use_char, use_fuse, use_rerank
+        self.char = CharIndex(docs) if use_char else None
+        self.dense = DenseIndex(docs) if use_dense else None
+        self.use_char, self.use_dense = use_char, use_dense
+        self.use_fuse, self.use_rerank, self.use_ce = use_fuse, use_rerank, use_ce
         self.shortlist = shortlist
 
+    def channels(self, query: str) -> list[list[tuple[int, float]]]:
+        out = [self.bm25.search(query)]
+        if self.char is not None:
+            out.append(self.char.search(query)[: self.shortlist * 2])
+        if self.dense is not None:
+            out.append(self.dense.search(query, k=self.shortlist * 2))
+        return out
+
     def search(self, query: str, k: int = 5) -> list[Hit]:
-        lexical = self.bm25.search(query)
-        if self.use_char:
-            fuzzy = self.char.search(query)
-            if self.use_fuse:
-                fused = rrf([lexical, fuzzy])
-            else:
-                # poor man's interleave, kept only to show why fusion is better
-                seen, fused = set(), []
-                for a, b in zip(lexical, fuzzy):
-                    for x in (a, b):
-                        if x[0] not in seen:
-                            seen.add(x[0])
-                            fused.append(x)
+        rankings = self.channels(query)
+        if self.use_fuse:
+            fused = rrf(rankings)
         else:
-            fused = lexical
+            # poor man's interleave, kept only to show why fusion is better
+            seen, fused = set(), []
+            for row in zip(*rankings):
+                for x in row:
+                    if x[0] not in seen:
+                        seen.add(x[0])
+                        fused.append(x)
         fused = fused[: self.shortlist]
         if self.use_rerank:
             fused = rerank(self.docs, query, fused, self.bm25.idf)
+        if self.use_ce:
+            fused = ce_rerank(self.docs, query, fused)
         return [Hit(self.docs[i].id, self.docs[i].title, s, r)
                 for r, (i, s) in enumerate(fused[:k], start=1)]
 
@@ -509,23 +616,28 @@ def _selftest() -> int:
     print()
     print("ablations, recall on {} labelled queries".format(len(QUERIES)))
     arms = [
-        ("BM25 only",                    RuleIndex(CORPUS, use_char=False)),
-        ("BM25 + char, interleaved",     RuleIndex(CORPUS, use_char=True, use_fuse=False)),
-        ("BM25 + char, RRF (shipped)",   RuleIndex(CORPUS, use_char=True, use_fuse=True, use_rerank=False)),
-        ("BM25 + char, RRF + rerank",    RuleIndex(CORPUS, use_rerank=True)),
+        ("BM25 only",                     RuleIndex(CORPUS, use_char=False, use_dense=False)),
+        ("BM25 + char, RRF",              RuleIndex(CORPUS, use_dense=False)),
+        ("BM25 + dense, RRF",             RuleIndex(CORPUS, use_char=False)),
+        ("three channel RRF (shipped)",   RuleIndex(CORPUS)),
+        ("three channel + coverage re",   RuleIndex(CORPUS, use_rerank=True)),
+        ("three channel + cross encoder", RuleIndex(CORPUS, use_ce=True)),
     ]
     print(f"  {'arm':30s} {'R@1':>6s} {'R@3':>6s} {'R@5':>6s} {'MRR':>6s}")
     for name, arm in arms:
         m = evaluate(arm)
         print(f"  {name:30s} {m['recall@1']:6.3f} {m['recall@3']:6.3f} {m['recall@5']:6.3f} {m['mrr']:6.3f}")
     print()
-    print("  the reranker is left out of the shipped path. It changes the top hit on three")
-    print("  queries and is wrong on all three, because coverage cannot cross a synonym:")
-    print("  \"how do I know which model made this quote\" should reach the version pinning")
-    print("  document, and no lexical overlap will take it there. Fusion is the shipped arm.")
+    print("  the cross-encoder ties fusion on recall and changes exactly two answers:")
+    print("  it fixes \"can I approve my own quote\", the synonym case that motivated the")
+    print("  dense channel, and it breaks \"how do I know which model made this quote\",")
+    print("  where it prefers a passage about order lines to the version pinning document.")
+    print("  Same score, one traded for the other, so it ships off and stays one flag away.")
+    print("  The dense channel is what earns its place: three channel fusion lifts R@1 from")
+    print("  0.947 to 0.974, and it is the only channel that crosses a synonym boundary.")
 
     print()
-    print("every query, top hit, shipped arm (fusion only):")
+    print("every query, top hit, shipped arm (three channel RRF):")
     shipped = RuleIndex(CORPUS)
     for query, gold in QUERIES:
         top = shipped.search(query, k=1)[0]

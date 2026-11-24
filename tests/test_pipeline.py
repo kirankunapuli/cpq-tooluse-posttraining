@@ -6,6 +6,7 @@ cannot silently come back.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -25,6 +26,36 @@ from crm_world import (  # noqa: E402
 )
 from filter_splits import _norm, _tokens, ngrams  # noqa: E402
 from harness import parse_calls, score_one, wilson  # noqa: E402
+
+
+@contextlib.contextmanager
+def _torch_stub():
+    """Stand in for torch while exercising the generation loop, then put back whatever
+    was there. Leaving the stub in sys.modules poisons every later test that needs the
+    real torch, which is exactly what happened: the retrieval and scope tests ran
+    against a module with a no_grad attribute and nothing else."""
+    import sys
+    import types
+
+    saved = sys.modules.get("torch")
+    stub = types.ModuleType("torch")
+
+    class _NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    stub.no_grad = _NoGrad
+    sys.modules["torch"] = stub
+    try:
+        yield
+    finally:
+        if saved is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = saved
 
 
 def test_unknown_id_raises():
@@ -346,22 +377,6 @@ def test_split_batch_normalises_encoding_and_tensor():
 def test_generate_all_survives_batch_encoding():
     """Regression: Colab failed with AttributeError because apply_chat_template returned a
     BatchEncoding and generate() tried to read inputs_tensor.shape."""
-    import sys
-    import types
-
-    if "torch" not in sys.modules:
-        stub = types.ModuleType("torch")
-
-        class _NoGrad:
-            def __enter__(self):
-                return None
-
-            def __exit__(self, *exc):
-                return False
-
-        stub.no_grad = _NoGrad
-        sys.modules["torch"] = stub
-
     from train_eval_colab import generate_all
 
     rows = [{"task_id": "T1", "messages": [
@@ -370,7 +385,8 @@ def test_generate_all_survives_batch_encoding():
         {"role": "assistant", "content": "a"},
     ]}]
     model = _FakeModel()
-    out = generate_all(model, _FakeTok(), rows, "\nRespond with JSON.", 16)
+    with _torch_stub():
+        out = generate_all(model, _FakeTok(), rows, "\nRespond with JSON.", 16)
     assert out["T1"] == "decoded(2)", out["T1"]
     assert model.seen is not None
 
@@ -383,22 +399,6 @@ class _OldStyleTok(_FakeTok):
 
 
 def test_generate_all_handles_old_style_tokenizer():
-    import sys
-    import types
-
-    if "torch" not in sys.modules:
-        stub = types.ModuleType("torch")
-
-        class _NoGrad:
-            def __enter__(self):
-                return None
-
-            def __exit__(self, *exc):
-                return False
-
-        stub.no_grad = _NoGrad
-        sys.modules["torch"] = stub
-
     from train_eval_colab import generate_all
 
     rows = [{"task_id": "T2", "messages": [
@@ -406,7 +406,8 @@ def test_generate_all_handles_old_style_tokenizer():
         {"role": "user", "content": "u"},
         {"role": "assistant", "content": "a"},
     ]}]
-    out = generate_all(_FakeModel(), _OldStyleTok(), rows, "", 16)
+    with _torch_stub():
+        out = generate_all(_FakeModel(), _OldStyleTok(), rows, "", 16)
     assert out["T2"] == "decoded(2)", out["T2"]
 
 
@@ -550,6 +551,30 @@ def test_scope_gate_band_is_ordered():
     assert gate.low < gate.high
 
 
+def test_normalizer_resolves_typos_but_not_unknown_entities():
+    """Two typos must resolve. A customer that does not exist must become a question,
+    because a confidently wrong customer produces a confidently wrong quote."""
+    from input_normalizer import parse
+
+    good = parse("40 tablets for lytware, 128 gig, blu")
+    assert good.sku.value == "PROD-TABLET-W"
+    assert good.account.value == "Litware Inc"
+    assert good.ready is True
+
+    bad = parse("quote 500 hub z for acme rocket corp")
+    assert bad.account.value is None
+    assert "account" in bad.questions
+
+
+def test_normalizer_reads_a_quantity_the_way_a_person_wrote_it():
+    from input_normalizer import parse_quantity
+
+    assert parse_quantity("3 hundred units")[0] == 300
+    assert parse_quantity("1.2k units")[0] == 1200
+    assert parse_quantity("5OO")[0] == 500
+    assert parse_quantity("1,200 units")[0] == 1200
+
+
 def test_retrieval_matches_an_identifier_exactly():
     """A near miss on a product identifier is a wrong product, so ids never fuzz."""
     from retrieval import CORPUS, RuleIndex
@@ -562,9 +587,27 @@ def test_retrieval_matches_an_identifier_exactly():
 def test_retrieval_fusion_beats_bm25_alone():
     from retrieval import CORPUS, RuleIndex, evaluate
 
-    bm25 = evaluate(RuleIndex(CORPUS, use_char=False))
-    fused = evaluate(RuleIndex(CORPUS))
+    bm25 = evaluate(RuleIndex(CORPUS, use_char=False, use_dense=False))
+    fused = evaluate(RuleIndex(CORPUS, use_char=True, use_dense=False))
     assert fused["recall@1"] >= bm25["recall@1"]
+
+
+def test_retrieval_dense_channel_crosses_a_synonym():
+    """The dense channel exists for the query that shares no word with its answer."""
+    from retrieval import CORPUS, RuleIndex, evaluate
+
+    index = RuleIndex(CORPUS)
+    if index.dense is None:
+        return          # no ML stack on this interpreter, covered by the conda run
+    assert index.dense is not None
+    assert evaluate(index)["recall@1"] > evaluate(
+        RuleIndex(CORPUS, use_char=True, use_dense=False))["recall@1"] - 0.06
+
+
+def test_retrieval_cross_encoder_is_off_by_default():
+    from retrieval import CORPUS, RuleIndex
+
+    assert RuleIndex(CORPUS).use_ce is False
 
 
 def test_retrieval_reranker_stays_off():
